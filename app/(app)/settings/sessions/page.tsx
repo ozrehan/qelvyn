@@ -9,9 +9,12 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { fmtDate } from "../../_components/status";
 
 type SessionRow = {
-  token: string;
-  tokenPrefix: string;
-  expires: string;
+  id: string;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  ipAddress: string | null;
+  userAgent: string | null;
   expired: boolean;
   current: boolean;
 };
@@ -35,10 +38,10 @@ export default function SessionsPage() {
     load();
   }, []);
 
-  async function revoke(token: string) {
-    setRevoking(token);
+  async function revoke(id: string) {
+    setRevoking(id);
     setError(null);
-    const res = await fetch(`/api/me/sessions/${encodeURIComponent(token)}`, {
+    const res = await fetch(`/api/me/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
     const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -56,7 +59,8 @@ export default function SessionsPage() {
         <p className="text-[11px] font-medium uppercase tracking-widest text-smoke">Account</p>
         <h1 className="mt-2 font-display text-3xl font-bold tracking-tight">Sessions</h1>
         <p className="mt-2 max-w-2xl text-smoke">
-          Every device signed in to your account, straight from the database.
+          Every device signed in to your account, recorded in the database. Revoking a
+          session signs that device out.
         </p>
       </div>
 
@@ -74,10 +78,10 @@ export default function SessionsPage() {
           {sessions && sessions.length > 0 && (
             <ul className="divide-y divide-ink/10">
               {sessions.map((s) => (
-                <li key={s.token} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                <li key={s.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
                   <div>
                     <p className="font-mono text-sm">
-                      {s.tokenPrefix}
+                      {s.id.slice(0, 8)}…
                       {s.current && (
                         <Badge tone="success" className="ml-2">
                           This device
@@ -89,16 +93,25 @@ export default function SessionsPage() {
                         </Badge>
                       )}
                     </p>
-                    <p className="mt-1 text-xs text-smoke">Expires {fmtDate(s.expires)}</p>
+                    <p className="mt-1 text-xs text-smoke">
+                      Signed in {fmtDate(s.createdAt)}
+                      {s.ipAddress ? ` · ${s.ipAddress}` : ""}
+                    </p>
+                    <p className="mt-0.5 text-xs text-smoke">
+                      Last seen {fmtDate(s.lastSeenAt)} · Expires {fmtDate(s.expiresAt)}
+                    </p>
+                    {s.userAgent && (
+                      <p className="mt-0.5 max-w-md truncate text-xs text-smoke">{s.userAgent}</p>
+                    )}
                   </div>
                   {!s.current && !s.expired && (
                     <Button
                       size="sm"
                       variant="outline"
-                      disabled={revoking === s.token}
-                      onClick={() => revoke(s.token)}
+                      disabled={revoking === s.id}
+                      onClick={() => revoke(s.id)}
                     >
-                      {revoking === s.token ? "Revoking…" : "Revoke"}
+                      {revoking === s.id ? "Revoking…" : "Revoke"}
                     </Button>
                   )}
                 </li>
