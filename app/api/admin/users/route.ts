@@ -1,4 +1,4 @@
-import { desc } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { users } from "@/lib/schema";
 import { requireAdmin } from "@/lib/api";
@@ -23,4 +23,17 @@ export async function GET() {
     .limit(200);
 
   return Response.json({ users: rows });
+}
+
+export async function DELETE(req: Request) {
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
+
+  const id = new URL(req.url).searchParams.get("id");
+  if (!id) return Response.json({ error: "Missing id." }, { status: 400 });
+  if (id === admin.id)
+    return Response.json({ error: "You cannot delete yourself." }, { status: 400 });
+
+  await db.delete(users).where(eq(users.id, id));
+  return Response.json({ ok: true });
 }
