@@ -47,6 +47,22 @@ export const sessions = pgTable("sessions", {
   expires: timestamp("expires").notNull(),
 });
 
+// App-managed login sessions (used with the JWT session strategy, since
+// Auth.js does not support the Credentials provider with database sessions).
+// Powers Settings → Sessions: every recorded login, with revocation.
+export const userSessions = pgTable("user_sessions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  lastSeenAt: timestamp("last_seen_at").defaultNow().notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  revokedAt: timestamp("revoked_at"),
+});
+
 export const verificationTokens = pgTable(
   "verification_tokens",
   {
