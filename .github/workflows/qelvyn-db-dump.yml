@@ -7,22 +7,50 @@ jobs:
   dump:
     runs-on: ubuntu-latest
     steps:
-      - name: pg_dump with PostgreSQL 18 client binary
+      - name: Corrected Postgres handshake probe
         run: |
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /etc/apt/trusted.gpg.d/pgdg.asc >/dev/null
-          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-18
-          ls /usr/lib/postgresql/18/bin/
-          /usr/lib/postgresql/18/bin/pg_dump --version
-          /usr/lib/postgresql/18/bin/pg_dump "$DATABASE_URL" -f /tmp/qdump.sql && echo PGDUMP-OK && ls -l /tmp/qdump.sql && head -c 400 /tmp/qdump.sql
+          cat > /tmp/hsprobe2.mjs <<'PROBEEOF'
+          import net from 'node:net';
+          import tls from 'node:tls';
+          const u = new URL(process.env.DATABASE_URL);
+          const sock = net.connect(5432, u.hostname);
+          sock.setTimeout(15000);
+          sock.once('connect', () => {
+            console.log('TCP connected, sending SSLRequest');
+            sock.write(Buffer.from([0, 0, 0, 8, 4, 210, 22, 47]));
+          });
+          sock.once('data', (d) => {
+            console.log('SSLRequest reply:', [...d]);
+            if (d[0] !== 83) { console.log('not S, aborting'); process.exit(0); }
+            const secure = tls.connect({ socket: sock, host: u.hostname, servername: u.hostname, rejectUnauthorized: false });
+            secure.on('secureConnect', () => {
+              console.log('TLS established:', secure.getProtocol());
+              const parts = ['user', u.username, 'database', u.pathname.slice(1)];
+              let body = Buffer.alloc(0);
+              for (const p of parts) body = Buffer.concat([body, Buffer.from(p + '\0')]);
+              body = Buffer.concat([body, Buffer.from([0])]);
+              const len = 8 + body.length;
+              const msg = Buffer.alloc(len);
+              msg.writeUInt32BE(len, 0);
+              msg.writeUInt32BE(196608, 4);
+              body.copy(msg, 8);
+              console.log('startup msg bytes:', len, 'params:', parts.join(','));
+              secure.write(msg);
+              console.log('startup message sent, waiting for reply...');
+            });
+            secure.on('data', (d) => {
+              console.log('server reply type:', String.fromCharCode(d[0]), 'len:', d.length);
+              console.log('first bytes:', [...d.slice(0, 80)]);
+              console.log('as text:', JSON.stringify(d.toString('utf8').slice(0, 200)));
+              process.exit(0);
+            });
+            secure.on('error', (e) => { console.log('TLS error:', e.message); process.exit(0); });
+            secure.on('close', () => { console.log('TLS socket closed (no reply)'); process.exit(0); });
+            secure.setTimeout(10000, () => { console.log('TLS timeout, no reply'); process.exit(0); });
+          });
+          sock.on('error', (e) => { console.log('TCP error:', e.message); process.exit(0); });
+          sock.on('timeout', () => { console.log('TCP timeout'); process.exit(0); });
+          PROBEEOF
+          node /tmp/hsprobe2.mjs; echo "probe exit: $?"
         env:
           DATABASE_URL: ${{ secrets.RENDER_DATABASE_URL }}
-      - name: Encrypt and upload
-        run: |
-          openssl enc -aes-256-cbc -salt -pbkdf2 -in /tmp/qdump.sql -out /tmp/qdump.sql.enc -pass pass:"${{ secrets.DUMP_PASSPHRASE }}"
-          ls -l /tmp/qdump.sql.enc
-      - uses: actions/upload-artifact@v4
-        with:
-          name: qelvyn-db-dump
-          path: /tmp/qdump.sql.enc
-          if-no-files-found: error
