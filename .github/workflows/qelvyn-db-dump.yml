@@ -7,50 +7,57 @@ jobs:
   dump:
     runs-on: ubuntu-latest
     steps:
-      - name: Corrected Postgres handshake probe
+      - name: Install PostgreSQL 18 client
         run: |
-          cat > /tmp/hsprobe2.mjs <<'PROBEEOF'
-          import net from 'node:net';
-          import tls from 'node:tls';
-          const u = new URL(process.env.DATABASE_URL);
-          const sock = net.connect(5432, u.hostname);
-          sock.setTimeout(15000);
-          sock.once('connect', () => {
-            console.log('TCP connected, sending SSLRequest');
-            sock.write(Buffer.from([0, 0, 0, 8, 4, 210, 22, 47]));
-          });
-          sock.once('data', (d) => {
-            console.log('SSLRequest reply:', [...d]);
-            if (d[0] !== 83) { console.log('not S, aborting'); process.exit(0); }
-            const secure = tls.connect({ socket: sock, host: u.hostname, servername: u.hostname, rejectUnauthorized: false });
-            secure.on('secureConnect', () => {
-              console.log('TLS established:', secure.getProtocol());
-              const parts = ['user', u.username, 'database', u.pathname.slice(1)];
-              let body = Buffer.alloc(0);
-              for (const p of parts) body = Buffer.concat([body, Buffer.from(p + '\0')]);
-              body = Buffer.concat([body, Buffer.from([0])]);
-              const len = 8 + body.length;
-              const msg = Buffer.alloc(len);
-              msg.writeUInt32BE(len, 0);
-              msg.writeUInt32BE(196608, 4);
-              body.copy(msg, 8);
-              console.log('startup msg bytes:', len, 'params:', parts.join(','));
-              secure.write(msg);
-              console.log('startup message sent, waiting for reply...');
-            });
-            secure.on('data', (d) => {
-              console.log('server reply type:', String.fromCharCode(d[0]), 'len:', d.length);
-              console.log('first bytes:', [...d.slice(0, 80)]);
-              console.log('as text:', JSON.stringify(d.toString('utf8').slice(0, 200)));
-              process.exit(0);
-            });
-            secure.on('error', (e) => { console.log('TLS error:', e.message); process.exit(0); });
-            secure.on('close', () => { console.log('TLS socket closed (no reply)'); process.exit(0); });
-            secure.setTimeout(10000, () => { console.log('TLS timeout, no reply'); process.exit(0); });
-          });
-          sock.on('error', (e) => { console.log('TCP error:', e.message); process.exit(0); });
-          sock.on('timeout', () => { console.log('TCP timeout'); process.exit(0); });
-          PROBEEOF
-          node /tmp/hsprobe2.mjs; echo "probe exit: $?"
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /etc/apt/trusted.gpg.d/pgdg.asc >/dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_dump --version
+      - name: pg_dump
+        run: |
+          /usr/lib/postgresql/18/bin/pg_dump "$DATABASE_URL" -f /tmp/qdump.sql && echo PGDUMP-OK || echo PGDUMP-FAIL
+          ls -l /tmp/qdump.sql 2>/dev/null || echo "no dump file"
         env:
           DATABASE_URL: ${{ secrets.RENDER_DATABASE_URL }}
+      - name: Node JSON dump (fallback if pg_dump failed)
+        if: failure()
+        run: echo "pg_dump step failed, skipping node fallback in this run"
+      - name: Node JSON dump fallback
+        run: |
+          if [ -s /tmp/qdump.sql ]; then echo "pg_dump produced a dump, skipping node fallback"; exit 0; fi
+          mkdir -p /tmp/qdump && cd /tmp/qdump && npm init -y >/dev/null 2>&1 && npm install pg --no-audit --no-fund
+          cat > /tmp/qdump/dump.mjs <<'DUMPEOF'
+          import { Client } from 'pg';
+          import fs from 'node:fs';
+          const client = new Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+          await client.connect();
+          const tables = (await client.query("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")).rows.map(r => r.tablename);
+          const size = await client.query("SELECT pg_size_pretty(pg_database_size(current_database())) AS s, pg_database_size(current_database()) AS b");
+          const out = { size: size.rows[0], tables: {}, sequences: {} };
+          for (const t of tables) {
+            const rows = (await client.query('SELECT * FROM "public"."' + t + '"')).rows;
+            out.tables[t] = rows;
+          }
+          const seqs = (await client.query("SELECT sequence_name FROM information_schema.sequences WHERE sequence_schema='public'")).rows;
+          for (const s of seqs) {
+            const v = await client.query('SELECT last_value FROM "' + s.sequence_name + '"');
+            out.sequences[s.sequence_name] = v.rows[0].last_value;
+          }
+          fs.writeFileSync('/tmp/qdump.json', JSON.stringify(out));
+          console.log('DUMPED size=' + JSON.stringify(size.rows[0]) + ' tables=' + Object.keys(out.tables).map(t => t + ':' + out.tables[t].length).join(','));
+          await client.end();
+          DUMPEOF
+          cd /tmp/qdump && node dump.mjs
+        env:
+          DATABASE_URL: ${{ secrets.RENDER_DATABASE_URL }}
+      - name: Encrypt and upload
+        run: |
+          if [ -s /tmp/qdump.sql ]; then SRC=/tmp/qdump.sql; echo "using pg_dump output"; else SRC=/tmp/qdump.json; echo "using node JSON output"; fi
+          ls -l "$SRC"
+          openssl enc -aes-256-cbc -salt -pbkdf2 -in "$SRC" -out /tmp/dump.enc -pass pass:"${{ secrets.DUMP_PASSPHRASE }}"
+          ls -l /tmp/dump.enc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qelvyn-db-dump
+          path: /tmp/dump.enc
+          if-no-files-found: error
