@@ -7,14 +7,23 @@ jobs:
   dump:
     runs-on: ubuntu-latest
     steps:
-      - name: Diagnose Render Postgres reachability
+      - name: Probe Postgres SSLRequest path
         run: |
-          echo "--- DNS ---"
-          getent hosts dpg-db6j6ujrjlhs73f1apa0-a.singapore-postgres.render.com || nslookup dpg-db6j6ujrjlhs73f1apa0-a.singapore-postgres.render.com || true
-          echo "--- TCP 5432 ---"
-          timeout 15 bash -c 'cat < /dev/null > /dev/tcp/dpg-db6j6ujrjlhs73f1apa0-a.singapore-postgres.render.com/5432 && echo TCP-OK' || echo TCP-FAIL
-          echo "--- openssl s_client with SNI ---"
-          echo | timeout 20 openssl s_client -connect dpg-db6j6ujrjlhs73f1apa0-a.singapore-postgres.render.com:5432 -servername dpg-db6j6ujrjlhs73f1apa0-a.singapore-postgres.render.com 2>&1 | head -20 || true
+          cat > /tmp/probe.mjs <<'PROBEEOF'
+          import net from 'node:net';
+          const host = 'dpg-db6j6ujrjlhs73f1apa0-a.singapore-postgres.render.com';
+          const sock = net.connect(5432, host);
+          sock.setTimeout(8000);
+          sock.on('connect', () => {
+            console.log('TCP connected, sending SSLRequest');
+            sock.write(Buffer.from([0, 0, 0, 8, 4, 210, 22, 47]));
+          });
+          sock.on('data', (d) => { console.log('SSLRequest reply bytes:', [...d], 'as text:', JSON.stringify(d.toString('utf8'))); sock.destroy(); });
+          sock.on('timeout', () => { console.log('probe: no reply within 8s'); sock.destroy(); });
+          sock.on('error', (e) => { console.log('probe error:', e.message); });
+          sock.on('close', () => { console.log('probe socket closed'); });
+          PROBEEOF
+          node /tmp/probe.mjs
       - name: Dump database to JSON
         run: |
           mkdir -p /tmp/qdump && cd /tmp/qdump && npm init -y >/dev/null 2>&1 && npm install pg --no-audit --no-fund
@@ -22,10 +31,11 @@ jobs:
           import { Client } from 'pg';
           import fs from 'node:fs';
           const u = new URL(process.env.DATABASE_URL);
-          console.log('connecting to host=' + u.hostname + ' user=' + u.username + ' db=' + u.pathname);
-          const client = new Client({ connectionString: process.env.DATABASE_URL, ssl: { servername: u.hostname, rejectUnauthorized: false } });
+          console.log('connecting direct-TLS to host=' + u.hostname);
+          const client = new Client({ connectionString: process.env.DATABASE_URL, ssl: { servername: u.hostname, rejectUnauthorized: false }, sslnegotiation: 'direct' });
           try {
             await client.connect();
+            console.log('connected OK');
           } catch (e) {
             console.log('CONNECT-ERROR name=' + e.name + ' message=' + e.message + ' code=' + e.code);
             throw e;
