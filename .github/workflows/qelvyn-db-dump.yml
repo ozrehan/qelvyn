@@ -7,57 +7,14 @@ jobs:
   dump:
     runs-on: ubuntu-latest
     steps:
-      - name: Raw Postgres handshake probe
-        run: |
-          cat > /tmp/hsprobe.mjs <<'PROBEEOF'
-          import net from 'node:net';
-          import tls from 'node:tls';
-          const u = new URL(process.env.DATABASE_URL);
-          const sock = net.connect(5432, u.hostname);
-          sock.setTimeout(15000);
-          sock.once('connect', () => {
-            console.log('TCP connected, sending SSLRequest');
-            sock.write(Buffer.from([0, 0, 0, 8, 4, 210, 22, 47]));
-          });
-          sock.once('data', (d) => {
-            console.log('SSLRequest reply:', [...d]);
-            if (d[0] !== 83) { console.log('not S, aborting'); sock.destroy(); return; }
-            const secure = tls.connect({ socket: sock, host: u.hostname, servername: u.hostname, rejectUnauthorized: false });
-            secure.on('secureConnect', () => {
-              console.log('TLS established, protocol:', secure.getProtocol(), 'alpn:', secure.alpnProtocol);
-              const params = Buffer.concat([
-                Buffer.from('user\0'), Buffer.from(u.username + '\0'),
-                Buffer.from('database\0'), Buffer.from(u.pathname.slice(1) + '\0'),
-                Buffer.from('\0'),
-              ]);
-              const len = 8 + params.length;
-              const msg = Buffer.alloc(4 + len);
-              msg.writeUInt32BE(len, 0);
-              msg.writeUInt32BE(196608, 4);
-              params.copy(msg, 8);
-              secure.write(msg);
-              console.log('startup message sent');
-            });
-            secure.on('data', (d) => {
-              console.log('server reply type:', String.fromCharCode(d[0]), 'len:', d.length, 'first bytes:', [...d.slice(0, 60)]);
-              secure.destroy();
-            });
-            secure.on('error', (e) => console.log('TLS error:', e.message));
-            secure.setTimeout(10000, () => { console.log('TLS timeout'); secure.destroy(); });
-          });
-          sock.on('error', (e) => console.log('TCP error:', e.message));
-          sock.on('timeout', () => { console.log('TCP timeout'); sock.destroy(); });
-          PROBEEOF
-          node /tmp/hsprobe.mjs
-        env:
-          DATABASE_URL: ${{ secrets.RENDER_DATABASE_URL }}
-      - name: Try pg_dump with PostgreSQL 18 client
+      - name: pg_dump with PostgreSQL 18 client binary
         run: |
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
           wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /etc/apt/trusted.gpg.d/pgdg.asc >/dev/null
           sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-18
-          pg_dump --version
-          pg_dump "$DATABASE_URL" -f /tmp/qdump.sql && echo PGDUMP-OK && ls -l /tmp/qdump.sql && head -c 400 /tmp/qdump.sql
+          ls /usr/lib/postgresql/18/bin/
+          /usr/lib/postgresql/18/bin/pg_dump --version
+          /usr/lib/postgresql/18/bin/pg_dump "$DATABASE_URL" -f /tmp/qdump.sql && echo PGDUMP-OK && ls -l /tmp/qdump.sql && head -c 400 /tmp/qdump.sql
         env:
           DATABASE_URL: ${{ secrets.RENDER_DATABASE_URL }}
       - name: Encrypt and upload
